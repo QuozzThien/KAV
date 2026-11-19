@@ -1,4 +1,4 @@
-/*! Khanware Practice Assistant v0.3.2 (bookmarklet). Chỉ đọc câu hỏi và hiển thị gợi ý; không chọn/điền/nộp bài. Tạo bởi scripts/build.js, đừng sửa tay. */
+/*! Khanware Practice Assistant v0.5.0 (bookmarklet + extension). Chỉ đọc câu hỏi và hiển thị gợi ý; không chọn/điền/nộp bài. Tạo bởi scripts/build.js, đừng sửa tay. */
 (function () {
 'use strict';
 if (!window.__KPA_TEST__ && !/(^|\.)khanacademy\.org$/i.test(location.hostname)) { alert('Công cụ này chỉ chạy trên khanacademy.org'); return; }
@@ -477,6 +477,301 @@ if (window.__KPA_LOADED__) { if (window.__KPA_OPEN__) window.__KPA_OPEN__(); ret
   if (typeof module === 'object' && module.exports) module.exports = K.diagnose;
 })(globalThis);
 
+/* ---- src/solver/local.js ---- */
+/* Bộ giải cục bộ: tính biểu thức, rút gọn/khai triển đa thức 1 biến, giải phương trình bậc 1-2 (nghiệm hữu tỉ).
+ * Chạy hoàn toàn trong trình duyệt, không gọi mạng, không dùng eval. Gặp bất cứ điều gì không chắc => trả null (để AI xử lý). */
+(function (root) {
+  const K = root.KPA || (root.KPA = {});
+  class Bail extends Error {}
+  const bail = m => { throw new Bail(m); };
+  const MAXD = 60, BOX = '\u25A1';
+
+  /* ---------- Số hữu tỉ (BigInt) ---------- */
+  const gcd = (a, b) => { a = a < 0n ? -a : a; b = b < 0n ? -b : b; while (b) [a, b] = [b, a % b]; return a; };
+  const R = (n, d) => {
+    n = BigInt(n); d = d === undefined ? 1n : BigInt(d);
+    if (d === 0n) bail('chia cho 0');
+    if (d < 0n) { n = -n; d = -d; }
+    const g = gcd(n, d) || 1n; n /= g; d /= g;
+    if (String(n).length > MAXD || String(d).length > MAXD) bail('số quá lớn');
+    return { n, d };
+  };
+  const ZERO = R(0), ONE = R(1);
+  const radd = (a, b) => R(a.n * b.d + b.n * a.d, a.d * b.d);
+  const rsub = (a, b) => R(a.n * b.d - b.n * a.d, a.d * b.d);
+  const rmul = (a, b) => R(a.n * b.n, a.d * b.d);
+  const rdiv = (a, b) => R(a.n * b.d, a.d * b.n);
+  const rneg = a => R(-a.n, a.d);
+  const rzero = a => a.n === 0n;
+  const req = (a, b) => a.n === b.n && a.d === b.d;
+  const rcmp = (a, b) => { const x = a.n * b.d, y = b.n * a.d; return x < y ? -1 : x > y ? 1 : 0; };
+  function rpow(a, k) {
+    if (k < 0) { if (rzero(a)) bail('0 mũ âm'); return rpow(rdiv(ONE, a), -k); }
+    let r = ONE, b = a;
+    while (k > 0) { if (k & 1) r = rmul(r, b); k >>= 1; if (k) b = rmul(b, b); }
+    return r;
+  }
+  function isqrt(n) {
+    if (n < 0n) return null; if (n < 2n) return n;
+    let x = BigInt(Math.floor(Math.sqrt(Number(n)))) || 1n;
+    for (let i = 0; i < 200; i++) { const y = (x + n / x) >> 1n; if (y === x || y === x + 1n || y === x - 1n) { x = y; break; } x = y; }
+    while (x * x > n) x--; while ((x + 1n) * (x + 1n) <= n) x++;
+    return x;
+  }
+  function rsqrt(a) {
+    if (a.n < 0n) return null;
+    const sn = isqrt(a.n), sd = isqrt(a.d);
+    return sn * sn === a.n && sd * sd === a.d ? R(sn, sd) : null;
+  }
+  const fmtR = r => (r.d === 1n ? String(r.n) : r.n + '/' + r.d);
+
+  /* ---------- Đa thức 1 biến: mảng hệ số theo bậc ---------- */
+  const trim = p => { p = p.slice(); while (p.length > 1 && rzero(p[p.length - 1])) p.pop(); return p; };
+  const C = r => [r];
+  const padd = (a, b) => { const n = Math.max(a.length, b.length), o = []; for (let i = 0; i < n; i++) o.push(radd(a[i] || ZERO, b[i] || ZERO)); return trim(o); };
+  const pneg = a => a.map(rneg);
+  const psub = (a, b) => padd(a, pneg(b));
+  const pmul = (a, b) => {
+    const o = Array(a.length + b.length - 1).fill(ZERO);
+    for (let i = 0; i < a.length; i++) for (let j = 0; j < b.length; j++) o[i + j] = radd(o[i + j], rmul(a[i], b[j]));
+    if (o.length > 9) bail('bậc quá cao');
+    return trim(o);
+  };
+  const deg = p => trim(p).length - 1;
+  const isConst = p => deg(p) === 0;
+  function ppow(p, k) {
+    if (isConst(p)) return C(rpow(p[0], k));
+    if (k < 0 || k > 8) bail('mũ không hỗ trợ');
+    let r = C(ONE); for (let i = 0; i < k; i++) r = pmul(r, p); return r;
+  }
+  const peval = (p, x) => { let r = ZERO; for (let i = p.length - 1; i >= 0; i--) r = radd(rmul(r, x), p[i]); return r; };
+  const peq = (a, b) => { a = trim(a); b = trim(b); return a.length === b.length && a.every((c, i) => req(c, b[i])); };
+  function fmtP(p, v) {
+    p = trim(p); const parts = [];
+    for (let i = p.length - 1; i >= 0; i--) {
+      const c = p[i]; if (rzero(c)) continue;
+      const neg = c.n < 0n, a = neg ? rneg(c) : c;
+      let body;
+      if (i === 0) body = fmtR(a);
+      else {
+        const x = i === 1 ? v : v + '^' + i;
+        body = req(a, ONE) ? x : (a.d === 1n ? String(a.n) : '(' + fmtR(a) + ')') + x;
+      }
+      parts.push((parts.length ? (neg ? ' - ' : ' + ') : (neg ? '-' : '')) + body);
+    }
+    return parts.length ? parts.join('') : '0';
+  }
+
+  /* ---------- Chuẩn hóa TeX/MathML-text thành chuỗi toán thuần ---------- */
+  function norm(s) {
+    s = String(s).replace(/\\left|\\right|\\displaystyle|\\textstyle|\\,|\\;|\\!|\\quad|\\ /g, ' ');
+    for (let i = 0; i < 6; i++) s = s.replace(/\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, '($1)/($2)');
+    s = s.replace(/\\cdot|\\times|[·×⋅∙]/g, '*').replace(/\\div|÷/g, '/').replace(/[−–—]/g, '-');
+    s = s.replace(/\^\s*\{([^{}]*)\}/g, '^($1)').replace(/\{/g, '(').replace(/\}/g, ')');
+    if (/[\\%|!√π∞\[\];:<>≤≥≠,]|sqrt|root/i.test(s.replace(/\u25A1/g, ''))) bail('ký hiệu chưa hỗ trợ');
+    return s.replace(/\s+/g, ' ').trim();
+  }
+
+  /* ---------- Phân tích cú pháp ---------- */
+  function tokenize(s) {
+    const t = []; let i = 0;
+    while (i < s.length) {
+      const c = s[i];
+      if (c === ' ') { i++; continue; }
+      if (/[0-9]/.test(c)) {
+        let j = i; while (j < s.length && /[0-9]/.test(s[j])) j++;
+        let frac = '';
+        if (s[j] === '.') { let k = j + 1; while (k < s.length && /[0-9]/.test(s[k])) k++; if (k === j + 1) bail('số thập phân lỗi'); frac = s.slice(j + 1, k); j = k; }
+        t.push({ t: 'n', v: R(BigInt(s.slice(i, j - (frac ? frac.length + 1 : 0)) + frac), 10n ** BigInt(frac.length)) }); i = j; continue;
+      }
+      if (/[a-zA-Z]/.test(c)) { t.push({ t: 'v', v: c }); i++; continue; }
+      if ('+-*/^()'.includes(c)) { t.push({ t: 'o', v: c }); i++; continue; }
+      bail('ký tự lạ: ' + c);
+    }
+    return t;
+  }
+  function parse(str, ctx) {
+    const tk = tokenize(norm(str)); let pos = 0;
+    const peek = () => tk[pos], isOp = c => peek() && peek().t === 'o' && peek().v === c;
+    function expr() {
+      let p = term();
+      while (isOp('+') || isOp('-')) { const op = tk[pos++].v; const q = term(); p = op === '+' ? padd(p, q) : psub(p, q); }
+      return p;
+    }
+    function term() {
+      let p = unary();
+      for (;;) {
+        if (isOp('*')) { pos++; p = pmul(p, unary()); }
+        else if (isOp('/')) { pos++; const q = unary(); if (!isConst(q) || rzero(q[0])) bail('chia cho biểu thức'); p = pmul(p, C(rdiv(ONE, q[0]))); }
+        else if (peek() && (peek().t === 'v' || (peek().t === 'o' && peek().v === '('))) p = pmul(p, power());
+        else break;
+      }
+      return p;
+    }
+    function unary() {
+      if (isOp('-')) { pos++; return pneg(unary()); }
+      if (isOp('+')) { pos++; return unary(); }
+      return power();
+    }
+    function power() {
+      const b = atom();
+      if (isOp('^')) {
+        pos++; let e;
+        if (isOp('(')) { pos++; const q = expr(); if (!isOp(')')) bail('thiếu )'); pos++; if (!isConst(q) || q[0].d !== 1n) bail('mũ không nguyên'); e = Number(q[0].n); }
+        else { let sg = 1; if (isOp('-')) { pos++; sg = -1; } const x = peek(); if (!x || x.t !== 'n' || x.v.d !== 1n) bail('mũ không hợp lệ'); pos++; e = sg * Number(x.v.n); }
+        if (Math.abs(e) > 30) bail('mũ quá lớn');
+        return ppow(b, e);
+      }
+      return b;
+    }
+    function atom() {
+      const x = tk[pos++]; if (!x) bail('biểu thức cụt');
+      if (x.t === 'n') return C(x.v);
+      if (x.t === 'v') { if (ctx.v && ctx.v !== x.v) bail('nhiều biến'); ctx.v = x.v; return [ZERO, ONE]; }
+      if (x.v === '(') { const p = expr(); if (!isOp(')')) bail('thiếu )'); pos++; return p; }
+      bail('cú pháp');
+    }
+    const p = expr(); if (pos !== tk.length) bail('còn dư ký tự'); return p;
+  }
+
+  /* ---------- Bộ tách đề ---------- */
+  const EXCL = /làm tròn|round|nearest|gần nhất|phần trăm|percent|lớn hơn|nhỏ hơn|greater|less than|larger|smaller|lớn nhất|nhỏ nhất|largest|smallest|không phải|\bnot\b|estimate|ước lượng|thập phân|decimal|hỗn số|mixed|scientific|khoa học|đơn vị|\bunits?\b|đồ thị|graph|đúng|sai\b|true|false|so sánh|compare|dấu\b|sign|domain|miền|tập xác định/;
+  const KW_SOLVE = /giải|solve|nghiệm|\btìm\s+\$?[a-z]\b|find\s+\$?[a-z]\b|\bfor\s+\$?[a-z]\b|value of\s+\$?[a-z]\b/;
+  const KW_EVAL = /tính|evaluate|compute|calculate|giá trị|bằng bao nhiêu|what is|find the value|tìm giá trị/;
+  const KW_SIMP = /rút gọn|thu gọn|simplify|expand|khai triển|phân phối|distribute/;
+  const KW_EQUIV = /tương đương|equivalent|equal to|bằng với|which (expression|value|number)|biểu thức nào|số nào|giá trị nào/;
+
+  function pieces(text) {
+    text = String(text).replace(/\[WIDGET [^\]]*\]|\[ô nhập\]/g, '\u0001');
+    const out = []; const re = /\$([^$]*)\$/g; let last = 0, m;
+    const addW = s => { s.split('\u0001').forEach((seg, i, a) => { if (seg) out.push({ k: 'w', s: seg }); if (i < a.length - 1) out.push({ k: 'm', s: BOX }); }); };
+    while ((m = re.exec(text))) { if (m.index > last) addW(text.slice(last, m.index)); out.push({ k: 'm', s: m[1] }); last = re.lastIndex; }
+    if (last < text.length) addW(text.slice(last));
+    // gộp "$a$ = □" / "$a$ + $b$": phần chữ chỉ gồm ký hiệu nối giữa hai khối toán
+    const merged = [];
+    for (let i = 0; i < out.length; i++) {
+      const p = out[i], prev = merged[merged.length - 1];
+      const left = merged[merged.length - 2];
+      const joinable = p.k === 'm' && prev && prev.k === 'w' && left && left.k === 'm' && /^[\s=+\-−×÷*/·^()]+$/.test(prev.s) &&
+        (/\S/.test(prev.s) || /[=+\-−×÷*/·^(]\s*$/.test(left.s) || /^\s*[=+\-−×÷*/·^)]/.test(p.s));
+      if (joinable) { merged.pop(); merged.pop(); merged.push({ k: 'm', s: left.s + prev.s + p.s }); }
+      else merged.push(p);
+    }
+    // phần "= □" đứng sau khối toán nhưng nằm lẫn trong chữ khác (vd. " = " rồi dấu chấm): đã được gộp ở trên khi cả hai phía là toán
+    return merged;
+  }
+
+  const isAssign = s => /^[a-zA-Z]\s*=\s*[-+]?[\d./() ]+$/.test(s.replace(/\\frac\s*\{(\d+)\}\s*\{(\d+)\}/g, '$1/$2').replace(/[−–]/g, '-'));
+  const hasEq = s => (s.match(/=/g) || []).length;
+
+  function solveEquation(s, ctx) {
+    const [l, r] = s.split('=');
+    if (!l.trim() || !r.trim()) bail('phương trình thiếu vế');
+    const P = psub(parse(l, ctx), parse(r, ctx)), d = deg(P);
+    if (!ctx.v) bail('không có biến');
+    if (d === 0) bail('vô nghiệm/vô số nghiệm');
+    if (d === 1) {
+      const root = rdiv(rneg(P[0]), P[1]);
+      return { roots: [root], steps: 'Đưa về dạng ' + fmtP(P, ctx.v) + ' = 0, suy ra ' + ctx.v + ' = ' + fmtR(root) + '.' };
+    }
+    if (d === 2) {
+      const [c, b, a] = P, disc = rsub(rmul(b, b), rmul(R(4), rmul(a, c))), sq = rsqrt(disc);
+      if (!sq) bail('nghiệm không hữu tỉ');
+      const two = rmul(R(2), a), r1 = rdiv(radd(rneg(b), sq), two), r2 = rdiv(rsub(rneg(b), sq), two);
+      const roots = (req(r1, r2) ? [r1] : [r1, r2]).sort(rcmp);
+      return { roots, steps: 'Đưa về ' + fmtP(P, ctx.v) + ' = 0, Δ = ' + fmtR(disc) + ', nghiệm: ' + roots.map(x => ctx.v + ' = ' + fmtR(x)).join('; ') + '.' };
+    }
+    bail('bậc > 2');
+  }
+
+  /* Trả về nhiệm vụ: { kind:'value', p, v, steps } hoặc { kind:'roots', roots, v, steps } */
+  function plan(ex) {
+    const text = ex.questionText || '';
+    const words = text.replace(/\$[^$]*\$/g, ' ').replace(/\[WIDGET[^\]]*\]|\[ô nhập\]/g, ' ').toLowerCase();
+    if (EXCL.test(words)) bail('đề có yêu cầu đặc biệt');
+    if (words.split(/\s+/).filter(Boolean).length > 40) bail('đề dài/bài toán lời văn');
+    const runs = pieces(text).filter(p => p.k === 'm').map(p => p.s.replace(/\s+/g, ' ').trim()).filter(Boolean);
+    if (!runs.length) bail('không có biểu thức');
+    const boxRuns = runs.filter(s => s.includes(BOX)), plain = runs.filter(s => !s.includes(BOX) && !/^[a-zA-Z]$/.test(s)); // bỏ các lần nhắc riêng một biến ("giải theo $x$")
+    if (boxRuns.length > 1) bail('nhiều ô nhập');
+
+    const wantsSolve = KW_SOLVE.test(words), wantsEval = KW_EVAL.test(words) || KW_SIMP.test(words) || KW_EQUIV.test(words);
+    const asValue = (src, steps) => { const ctx = { v: null }; const p = parse(src, ctx); return { kind: 'value', p, v: ctx.v, steps: steps || (norm(src) + ' = ' + fmtP(p, ctx.v || 'x')) }; };
+    const subst = (exprSrc, assignSrc) => {
+      const [lv, rv] = assignSrc.split('='), c = { v: null }, k = parse(rv, c); if (!isConst(k)) bail('gán không phải hằng');
+      const name = lv.trim(); if (!/^[a-zA-Z]$/.test(name)) bail('gán lạ');
+      const ctx = { v: null }, p = parse(exprSrc, ctx); if (ctx.v && ctx.v !== name) bail('biến không khớp');
+      const val = peval(p, k[0]); return { kind: 'value', p: C(val), v: null, steps: 'Thay ' + name + ' = ' + fmtR(k[0]) + ' vào ' + norm(exprSrc) + ' được ' + fmtR(val) + '.' };
+    };
+    const fromPlain = (needKw) => {
+      const assigns = plain.filter(isAssign), eqs = plain.filter(s => hasEq(s) === 1 && !isAssign(s)), exprs = plain.filter(s => !hasEq(s));
+      if (plain.some(s => hasEq(s) > 1)) bail('nhiều dấu =');
+      if (eqs.length === 1 && !exprs.length && !assigns.length) { if (!wantsSolve && needKw) bail('chưa rõ yêu cầu giải'); const ctx = { v: null }, r = solveEquation(eqs[0], ctx); return { kind: 'roots', roots: r.roots, v: ctx.v, steps: r.steps }; }
+      if (exprs.length === 1 && assigns.length === 1 && !eqs.length) return subst(exprs[0], assigns[0]);
+      if (exprs.length === 1 && !eqs.length && !assigns.length) { if (!wantsEval && needKw) bail('chưa rõ yêu cầu tính'); return asValue(exprs[0]); }
+      if (assigns.length === 1 && !exprs.length && !eqs.length && wantsSolve) { const ctx = { v: null }, r = solveEquation(assigns[0], ctx); return { kind: 'roots', roots: r.roots, v: ctx.v, steps: r.steps }; }
+      bail('không xác định được yêu cầu');
+    };
+
+    if (!boxRuns.length) return fromPlain(true);          // trắc nghiệm: chỉ dựa vào biểu thức trong đề
+    const br = boxRuns[0].replace(/\s+/g, '');
+    let m = /^(.+)=\u25A1$/.exec(br) || /^\u25A1=(.+)$/.exec(br);
+    if (m) {
+      const L = m[1]; if (L.includes('=')) bail('nhiều dấu =');
+      if (/^[a-zA-Z]$/.test(L)) { // "x = □": giải phương trình ở nơi khác
+        const t = fromPlain(false); if (t.kind !== 'roots' || t.v !== L) bail('biến không khớp phương trình'); return t;
+      }
+      const ctx = { v: null }, p = parse(L, ctx);
+      if (isConst(p)) return { kind: 'value', p, v: null, steps: norm(L) + ' = ' + fmtR(p[0]) + '.' };
+      const asg = plain.filter(isAssign); if (asg.length === 1 && plain.length === 1) return subst(L, asg[0]);
+      if (KW_SIMP.test(words)) return { kind: 'value', p, v: ctx.v, steps: 'Rút gọn: ' + fmtP(p, ctx.v) + '.' };
+      bail('biểu thức có biến');
+    }
+    if (br === BOX) return fromPlain(true);               // ô nhập đứng riêng
+    bail('dạng ô nhập chưa hỗ trợ');
+  }
+
+  /* ---------- Gắn đáp án vào widget ---------- */
+  const INPUTS = ['numeric-input', 'input-number', 'expression', 'text-input'];
+  function textOfTask(t) { return t.kind === 'roots' ? t.roots.map(fmtR) : [t.v ? fmtP(t.p, t.v) : fmtR(t.p[0])]; }
+
+  function optionMatches(opt, t) {
+    let s = norm(String(opt).replace(/\$/g, ' ')); const ctx = { v: null };
+    if (/\b(or|and|hoặc|và)\b/i.test(s)) bail('đáp án nhiều phần');
+    const eq = s.split('='); if (eq.length > 2) bail('đáp án lạ');
+    if (eq.length === 2) { if (!/^[a-zA-Z]$/.test(eq[0].trim())) bail('đáp án lạ'); s = eq[1]; }
+    const p = parse(s, ctx);
+    if (t.kind === 'roots') return isConst(p) && req(p[0], t.roots[0]);
+    if (isConst(p) && isConst(t.p)) return req(p[0], t.p[0]);
+    return ctx.v === t.v && peq(p, t.p);
+  }
+
+  function solve(ex) {
+    try {
+      if (!ex || ex.status !== 'ok' || !ex.widgets || ex.widgets.length !== 1) return null;
+      const w = ex.widgets[0]; if (w.status !== 'ok') return null;
+      const t = plan(ex), vals = textOfTask(t);
+      let answer;
+      if (INPUTS.includes(w.type)) {
+        const n = w.data.fields.length;
+        if (t.kind === 'roots' ? t.roots.length !== n : n !== 1) return null;
+        answer = { values: vals };
+      } else if (w.type === 'radio' || w.type === 'dropdown') {
+        if (w.type === 'radio' && w.data.multiple) return null;
+        if (t.kind === 'roots' && t.roots.length !== 1) return null;
+        const hit = [];
+        for (const o of w.data.options) if (optionMatches(o.text, t)) hit.push(o.index);
+        if (hit.length !== 1) return null;
+        answer = { selected: w.type === 'radio' ? [hit[0]] : hit[0] };
+      } else return null;
+      return { answers: [{ widgetId: w.id, status: 'answered', answer }], explanation: t.steps + ' (Giải bằng bộ giải cục bộ, không dùng AI.)', confidence: 0.99, local: true };
+    } catch (e) { if (e instanceof Bail || e instanceof RangeError) return null; return null; }
+  }
+
+  K.localSolver = { solve, _t: { parse, norm, plan, pieces, fmtP, fmtR } };
+  if (typeof module === 'object' && module.exports) module.exports = K.localSolver;
+})(globalThis);
+
 /* ---- src/ai/promptBuilder.js ---- */
 /* Dựng prompt từ JSON đã chuẩn hóa. Mỗi widget kèm định dạng đáp án riêng (lấy từ registry). */
 (function (root) {
@@ -547,7 +842,7 @@ if (window.__KPA_LOADED__) { if (window.__KPA_OPEN__) window.__KPA_OPEN__(); ret
       results.push({ widgetId: w.id, type: w.type, lines: d.lines, marks: d.marks, table: d.table, experimental: w.experimental });
     }
     if (errors.length) return { ok: false, errors };
-    return { ok: true, results, explanation: String(obj.explanation || '').slice(0, 3000), confidence: normConfidence(obj.confidence), needsMoreInfo };
+    return { ok: true, results, explanation: String(obj.explanation || '').slice(0, 3000), confidence: normConfidence(obj.confidence), needsMoreInfo, local: obj.local === true };
   }
 
   K.responseParser = { extractJson, validate, normConfidence };
@@ -578,7 +873,8 @@ if (window.__KPA_LOADED__) { if (window.__KPA_OPEN__) window.__KPA_OPEN__(); ret
       box.append(sec);
     }
     if (v.explanation) { const s = el(doc, 'section', 'kpa-card'); s.append(el(doc, 'strong', '', 'Giải thích'), el(doc, 'div', 'kpa-value', v.explanation)); box.append(s); }
-    if (v.confidence != null) box.append(el(doc, 'div', 'kpa-conf', 'Độ tin cậy (AI tự đánh giá): ' + Math.round(v.confidence * 100) + '%'));
+    if (v.local) box.append(el(doc, 'div', 'kpa-conf', 'Tính trực tiếp bằng bộ giải cục bộ (chính xác, không qua AI).'));
+    else if (v.confidence != null) box.append(el(doc, 'div', 'kpa-conf', 'Độ tin cậy (AI tự đánh giá): ' + Math.round(v.confidence * 100) + '%'));
     if (v.needsMoreInfo) box.append(el(doc, 'div', 'kpa-warn', 'Dữ liệu có thể chưa đủ. Hãy tự kiểm tra trước khi dùng gợi ý.'));
     return box;
   }
@@ -627,24 +923,19 @@ if (window.__KPA_LOADED__) { if (window.__KPA_OPEN__) window.__KPA_OPEN__(); ret
     return { fatal: true, ...fail('http_error', 'Lỗi HTTP ' + status + ': ' + d) };
   }
 
-  async function solve(id, system, user, opts) {
-    opts = opts || {};
-    const apiKey = store.get('kpa_apiKey', ''), model = store.get('kpa_model', '') || DEFAULT_MODEL;
-    if (!apiKey) return fail('no_key', 'Chưa có OpenRouter API key. Bấm "Cài đặt API key / model".');
-    if (!system || !user || system.length > MAX_SYSTEM || user.length > MAX_USER) return fail('bad_input', 'Dữ liệu câu hỏi trống hoặc quá dài.');
-    const ctrl = new AbortController(); inflight.set(id, ctrl);
+  async function callOne(P, ctrl, system, user, opts, maxRetries) {
     let jsonMode = true, last;
-    try {
-      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    {
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
         if (ctrl.signal.aborted) return fail('aborted', 'Đã hủy yêu cầu.');
         const ac = new AbortController(); let timedOut = false;
         const onAbort = () => ac.abort(); ctrl.signal.addEventListener('abort', onAbort, { once: true });
         const timer = setTimeout(() => { timedOut = true; ac.abort(); }, TIMEOUT_MS);
         let retryAfter = 0;
         try {
-          const body = { model, temperature: 0.1, max_tokens: opts.maxTokens || MAX_TOKENS, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] };
+          const body = { model: P.model, temperature: 0.1, max_tokens: opts.maxTokens || MAX_TOKENS, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] };
           if (jsonMode) body.response_format = { type: 'json_object' };
-          const res = await fetch(ENDPOINT, { method: 'POST', signal: ac.signal, headers: { Authorization: 'Bearer ' + apiKey, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          const res = await fetch(P.url, { method: 'POST', signal: ac.signal, headers: { Authorization: 'Bearer ' + P.key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
           const data = await res.json().catch(() => ({}));
           if (!res.ok || (data && data.error)) {
             const status = res.ok ? Number(data.error.code) || 500 : res.status, detail = (data && data.error && data.error.message) || '';
@@ -659,9 +950,35 @@ if (window.__KPA_LOADED__) { if (window.__KPA_OPEN__) window.__KPA_OPEN__(); ret
         } catch (_) {
           if (ctrl.signal.aborted) return fail('aborted', 'Đã hủy yêu cầu.');
           last = timedOut ? fail('timeout', 'Hết thời gian chờ AI (45 giây).')
-            : fail('network', 'Lỗi mạng khi gọi OpenRouter. Nếu trang chặn kết nối ra ngoài (CSP), hãy dùng bản extension.');
+            : fail('network', 'Lỗi mạng khi gọi ' + P.name + '. Nếu trang chặn kết nối ra ngoài (CSP), hãy dùng bản extension.');
         } finally { clearTimeout(timer); ctrl.signal.removeEventListener('abort', onAbort); }
-        if (attempt < MAX_RETRIES) { try { await sleep(retryAfter || (opts.backoffMs != null ? opts.backoffMs : 800) * 2 ** attempt, ctrl.signal); } catch (_) { return fail('aborted', 'Đã hủy yêu cầu.'); } }
+        if (attempt < maxRetries) { try { await sleep(retryAfter || (opts.backoffMs != null ? opts.backoffMs : 800) * 2 ** attempt, ctrl.signal); } catch (_) { return fail('aborted', 'Đã hủy yêu cầu.'); } }
+      }
+      return last;
+    }
+  }
+
+  const hostOf = u => { try { return new URL(u).host; } catch (_) { return u; } };
+  function providers() { // OpenRouter (key cũ) + các nhà cung cấp dự phòng tương thích OpenAI (URL|model|key)
+    const list = [], key = store.get('kpa_apiKey', '');
+    if (key) list.push({ name: 'OpenRouter', url: ENDPOINT, model: store.get('kpa_model', '') || DEFAULT_MODEL, key });
+    for (const p of store.get('kpa_providers', [])) if (p && p.url && p.model && p.key) list.push({ name: hostOf(p.url), url: p.url, model: p.model, key: p.key });
+    return list;
+  }
+  let rr = 0; // xoay vòng điểm bắt đầu để dàn đều hạn mức; lỗi/429 thì chuyển sang nhà cung cấp kế tiếp
+  async function solve(id, system, user, opts) {
+    opts = opts || {};
+    const list = providers();
+    if (!list.length) return fail('no_key', 'Bộ giải cục bộ không giải được câu này và chưa có API key để hỏi AI. Bấm "Cài đặt API key / model".');
+    if (!system || !user || system.length > MAX_SYSTEM || user.length > MAX_USER) return fail('bad_input', 'Dữ liệu câu hỏi trống hoặc quá dài.');
+    const ctrl = new AbortController(); inflight.set(id, ctrl);
+    try {
+      let last; const first = rr++ % list.length;
+      for (let i = 0; i < list.length; i++) {
+        const r = await callOne(list[(first + i) % list.length], ctrl, system, user, opts, list.length > 1 ? 1 : MAX_RETRIES);
+        if (r && r.ok) return r;
+        if (r && r.code === 'aborted') return r;
+        last = r;
       }
       return last;
     } finally { inflight.delete(id); }
@@ -674,20 +991,44 @@ if (window.__KPA_LOADED__) { if (window.__KPA_OPEN__) window.__KPA_OPEN__(); ret
     const key = mk('input', { type: 'password', autocomplete: 'off', placeholder: 'sk-or-...', 'aria-label': 'OpenRouter API key' });
     const model = mk('input', { type: 'text', placeholder: DEFAULT_MODEL, 'aria-label': 'Model' });
     key.value = store.get('kpa_apiKey', ''); model.value = store.get('kpa_model', '') || '';
+    const extra = mk('textarea', { rows: '4', placeholder: 'Dự phòng (mỗi dòng một nhà cung cấp): URL|model|key', 'aria-label': 'Nhà cung cấp dự phòng (URL|model|key)' });
+    extra.value = store.get('kpa_providers', []).map(p => [p.url, p.model, p.key].join('|')).join('\n');
     const save = mk('button', { type: 'button', class: 'kpa-small' }, 'Lưu');
     const clear = mk('button', { type: 'button', class: 'kpa-small' }, 'Xóa key');
-    box.append(mk('strong', {}, 'Cài đặt'), mk('p', { class: 'kpa-note' }, 'Key lưu trong localStorage của khanacademy.org (trang có thể đọc được). Dùng key có hạn mức thấp, không dùng chung.'), key, model, save, clear);
+    box.append(mk('strong', {}, 'Cài đặt'), mk('p', { class: 'kpa-note' }, 'Key lưu trong localStorage của khanacademy.org (trang có thể đọc được). Dùng key có hạn mức thấp, không dùng chung.'), key, model, mk('p', { class: 'kpa-note' }, 'Tùy chọn: thêm nhà cung cấp tương thích OpenAI (Groq, Gemini, Cerebras...) để xoay vòng khi một nơi hết hạn mức. Mỗi dòng: https://.../chat/completions|tên-model|key'), extra, save, clear);
     save.addEventListener('click', () => {
       const k = key.value.trim(), m = model.value.trim();
       if (k && !/^sk-or-[\w-]{10,}$/.test(k)) return ui.setStatus('Key có định dạng không quen thuộc (thường bắt đầu bằng sk-or-).', 'error');
       if (m && !/^[\w.:\-\/]{1,100}$/.test(m)) return ui.setStatus('Tên model không hợp lệ.', 'error');
-      store.set('kpa_apiKey', k); store.set('kpa_model', m); ui.setStatus('Đã lưu cài đặt.', 'ok');
+      const provs = [];
+      for (const line of extra.value.split('\n').map(x => x.trim()).filter(Boolean)) {
+        const [url, md, ky] = line.split('|').map(x => (x || '').trim());
+        if (!/^https:\/\/[^\s|]+$/.test(url || '') || !/^[\w.:\-\/]{1,100}$/.test(md || '') || !ky || /\s/.test(ky)) return ui.setStatus('Dòng nhà cung cấp không hợp lệ: ' + line.slice(0, 40) + '… (cần URL https|model|key)', 'error');
+        provs.push({ url, model: md, key: ky });
+      }
+      store.set('kpa_apiKey', k); store.set('kpa_model', m); store.set('kpa_providers', provs); ui.setStatus('Đã lưu cài đặt (' + provs.length + ' nhà cung cấp dự phòng).', 'ok');
     });
-    clear.addEventListener('click', () => { store.del('kpa_apiKey'); key.value = ''; ui.setStatus('Đã xóa API key.', 'ok'); });
+    clear.addEventListener('click', () => { store.del('kpa_apiKey'); store.del('kpa_providers'); key.value = ''; extra.value = ''; ui.setStatus('Đã xóa toàn bộ API key.', 'ok'); });
     ui.body.append(box);
   }
 
-  K.transport = {
+  /* ---- Chế độ tiện ích (Manifest V3): gọi AI qua service worker (không bị CSP của trang, key nằm trong chrome.storage của tiện ích) ---- */
+  const EXT = typeof chrome !== 'undefined' && !!(chrome.runtime && chrome.runtime.id);
+  const extCall = msg => new Promise(res => {
+    try { chrome.runtime.sendMessage(msg, r => { const e = chrome.runtime.lastError; res(e ? fail('ext', 'Không liên lạc được với tiện ích: ' + e.message) : (r || fail('ext', 'Tiện ích không phản hồi.'))); }); }
+    catch (e) { res(fail('ext', 'Không liên lạc được với tiện ích: ' + e.message)); }
+  });
+  function solveExt(id, system, user) {
+    if (!system || !user || system.length > MAX_SYSTEM || user.length > MAX_USER) return Promise.resolve(fail('bad_input', 'Dữ liệu câu hỏi trống hoặc quá dài.'));
+    return extCall({ type: 'KPA_SOLVE', id, system, user });
+  }
+  K.transport = EXT ? {
+    kind: 'extension', solve: solveExt,
+    openSettings: ui => extCall({ type: 'KPA_OPEN_OPTIONS' }).then(r => ui.setStatus(r && r.ok ? 'Đã mở trang cài đặt của tiện ích.' : 'Không mở được trang cài đặt: vào chrome://extensions → Chi tiết → Tùy chọn tiện ích.', r && r.ok ? 'ok' : 'warn')),
+    abort: id => { extCall({ type: 'KPA_ABORT', id }); },
+    getPrefs: cb => { try { chrome.storage.local.get('kpa_prefs', o => cb((o && o.kpa_prefs) || {})); } catch (_) { cb({}); } },
+    setPrefs: p => { try { chrome.storage.local.set({ kpa_prefs: { kpaTheme: p.theme, kpaCollapsed: p.collapsed } }); } catch (_) {} }
+  } : {
     kind: 'bookmarklet', solve, openSettings,
     abort: id => { const c = inflight.get(id); if (c) c.abort(); },
     getPrefs: cb => cb(store.get('kpa_prefs', {})),
@@ -726,6 +1067,10 @@ if (window.__KPA_LOADED__) { if (window.__KPA_OPEN__) window.__KPA_OPEN__(); ret
   panel.append(header, body); host.append(launch, panel);
   document.documentElement.appendChild(host);
 
+  /* Bộ nhớ đệm kết quả AI theo fingerprint câu hỏi (tối đa 150 mục, lưu localStorage) */
+  const CK = "kpa_cache_v1", CMAX = 150;
+  const cacheGet = fp => { try { return (JSON.parse(localStorage.getItem(CK) || "{}"))["f" + fp] || null; } catch (_) { return null; } };
+  const cachePut = (fp, val) => { try { const o = JSON.parse(localStorage.getItem(CK) || "{}"); delete o["f" + fp]; o["f" + fp] = val; const ks = Object.keys(o); while (ks.length > CMAX) delete o[ks.shift()]; localStorage.setItem(CK, JSON.stringify(o)); } catch (_) {} };
   const setStatus = (msg, kind) => { status.textContent = msg; status.dataset.kind = kind || ""; };
 
   /* ---------- Tùy chọn giao diện (chrome.storage.sync: chỉ lưu theme/thu nhỏ, KHÔNG lưu key) ---------- */
@@ -758,24 +1103,31 @@ if (window.__KPA_LOADED__) { if (window.__KPA_OPEN__) window.__KPA_OPEN__(); ret
         setStatus((ex.status === "unsupported" ? "Chưa hỗ trợ: " : "Chưa đủ dữ liệu: ") + ex.reason, "warn");
         return;
       }
-      const prompt = K.promptBuilder.build(ex);
-      if (prompt.error) { setStatus(prompt.error, "warn"); return; }
-      st.reqId = "kpa-" + Date.now() + "-" + my;
-      setStatus("Đang hỏi AI… (có thể hủy bằng cách chuyển câu hỏi)", "busy");
-      const res = await T.solve(st.reqId, prompt.system, prompt.user);
-      if (my !== st.seq) return; // đã đổi câu / hủy
-      st.reqId = null;
-      if (!res?.ok) throw new Error(res?.error || "Không nhận được phản hồi từ tiện ích.");
-      let parsed; try { parsed = K.responseParser.extractJson(res.result); } catch (e) { throw new Error(e.message + " Hãy thử lại hoặc đổi model."); }
-      const v = K.responseParser.validate(parsed, ex);
-      if (!v.ok) throw new Error("Phản hồi AI không khớp dữ liệu câu hỏi (" + v.errors.join("; ") + "). Bấm phân tích lại.");
+      let v = null, via = "";
+      const loc = K.localSolver && K.localSolver.solve(ex); // tầng 0: tính trực tiếp, không mạng, không giới hạn
+      if (loc) { const lv = K.responseParser.validate(loc, ex); if (lv.ok) { v = lv; via = "local"; } }
+      if (!v) { const hit = cacheGet(ex.fingerprint); if (hit) { const cv = K.responseParser.validate(hit, ex); if (cv.ok) { v = cv; via = "cache"; } } } // tầng 1: đã hỏi AI trước đó
+      if (!v) { // tầng 2: hỏi AI (xoay vòng nhà cung cấp)
+        const prompt = K.promptBuilder.build(ex);
+        if (prompt.error) { setStatus(prompt.error, "warn"); return; }
+        st.reqId = "kpa-" + Date.now() + "-" + my;
+        setStatus("Đang hỏi AI… (có thể hủy bằng cách chuyển câu hỏi)", "busy");
+        const res = await T.solve(st.reqId, prompt.system, prompt.user);
+        if (my !== st.seq) return; // đã đổi câu / hủy
+        st.reqId = null;
+        if (!res?.ok) throw new Error(res?.error || "Không nhận được phản hồi từ tiện ích.");
+        let parsed; try { parsed = K.responseParser.extractJson(res.result); } catch (e) { throw new Error(e.message + " Hãy thử lại hoặc đổi model."); }
+        v = K.responseParser.validate(parsed, ex);
+        if (!v.ok) throw new Error("Phản hồi AI không khớp dữ liệu câu hỏi (" + v.errors.join("; ") + "). Bấm phân tích lại.");
+        cachePut(ex.fingerprint, parsed); via = "ai";
+      }
       // chống race: câu hỏi phải còn nguyên như lúc gửi
       if (K.reader.read().exercise.fingerprint !== ex.fingerprint) { setStatus("Câu hỏi đã thay đổi trong lúc chờ AI. Bấm phân tích lại.", "warn"); return; }
       st.last = v; st.refs = read.refs;
       result.append(K.renderer.buildResultNode(document, v));
       K.renderer.applyMarks(read.refs, v);
       bCopy.hidden = false; bAnalyze.textContent = "Phân tích lại";
-      setStatus("Đã có gợi ý. Bạn tự quyết định thao tác trên bài tập.", "ok");
+      setStatus((via === "local" ? "Đã giải bằng bộ giải cục bộ (không dùng API). " : via === "cache" ? "Lấy từ bộ nhớ đệm (không tốn lượt AI). " : "Đã có gợi ý từ AI. ") + "Bạn tự quyết định thao tác trên bài tập.", "ok");
     } catch (e) {
       if (my === st.seq) setStatus(e.message, "error");
     } finally { if (my === st.seq) { st.busy = false; bAnalyze.disabled = false; st.reqId = null; } }

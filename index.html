@@ -5,7 +5,7 @@
 <p>Trợ lý luyện tập cho Khan Academy: chỉ đọc câu hỏi đang hiển thị và <b>gợi ý</b>; không tự chọn, điền hay nộp bài.</p>
 <h2>Cài bookmarklet</h2>
 <ol><li>Kéo nút này lên thanh dấu trang: <a id="bm" class="bm" href="#">KPA</a><br><small>(nếu không kéo được: tạo dấu trang mới, dán đoạn bên dưới vào ô URL)</small></li>
-<li>Mở bài tập trên khanacademy.org, bấm dấu trang <b>KPA</b>, bấm nút <b>AI</b> → <b>Cài đặt API key / model</b> → nhập OpenRouter key.</li></ol>
+<li>Mở bài tập trên khanacademy.org, bấm dấu trang <b>KPA</b>, bấm nút <b>AI</b> → <b>Phân tích</b>. Bài tính toán/giải phương trình được giải ngay trong trình duyệt, không cần key. Chỉ khi gặp dạng bài khác, tool mới hỏi AI: lúc đó vào <b>Cài đặt API key / model</b> nhập OpenRouter key (và tùy chọn thêm nhà cung cấp dự phòng để xoay vòng hạn mức).</li></ol>
 <textarea id="code" readonly></textarea>
 <div class="warn"><p><b>Lưu ý:</b> key lưu trong localStorage của khanacademy.org nên script của trang đọc được; dùng key có hạn mức thấp. Nếu Khan chặn tải script ngoài hoặc kết nối tới openrouter.ai (CSP) thì bookmarklet sẽ không chạy: hãy dùng bản extension.</p></div>
 <script>
