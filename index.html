@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Khanware Practice Assistant – Bookmarklet</title>
+<style>:root{color-scheme:light dark}body{font:16px/1.6 Arial,sans-serif;max-width:720px;margin:30px auto;padding:0 16px}a.bm{display:inline-block;padding:12px 18px;border-radius:10px;background:#2563eb;color:#fff;font-weight:700;text-decoration:none}code,textarea{font-family:monospace;font-size:13px}textarea{width:100%;height:90px}.warn{border-left:4px solid #b45309;padding:6px 12px;background:#b4530918}</style></head><body>
+<h1>Khanware Practice Assistant</h1>
+<p>Trợ lý luyện tập cho Khan Academy: chỉ đọc câu hỏi đang hiển thị và <b>gợi ý</b>; không tự chọn, điền hay nộp bài.</p>
+<h2>Cài bookmarklet</h2>
+<ol><li>Kéo nút này lên thanh dấu trang: <a id="bm" class="bm" href="#">KPA</a><br><small>(nếu không kéo được: tạo dấu trang mới, dán đoạn bên dưới vào ô URL)</small></li>
+<li>Mở bài tập trên khanacademy.org, bấm dấu trang <b>KPA</b>, bấm nút <b>AI</b> → <b>Cài đặt API key / model</b> → nhập OpenRouter key.</li></ol>
+<textarea id="code" readonly></textarea>
+<div class="warn"><p><b>Lưu ý:</b> key lưu trong localStorage của khanacademy.org nên script của trang đọc được; dùng key có hạn mức thấp. Nếu Khan chặn tải script ngoài hoặc kết nối tới openrouter.ai (CSP) thì bookmarklet sẽ không chạy: hãy dùng bản extension.</p></div>
+<script>
+// Link được dựng từ chính địa chỉ trang này, nên đúng với mọi repo/tên miền GitHub Pages.
+var src = new URL('kpa.js', location.href).href;
+var code = "javascript:(function(){var s=document.createElement('script');s.src='" + src + "?v='+Date.now();s.onerror=function(){alert('Không tải được KPA (trang có thể chặn script ngoài)')};document.head.appendChild(s)})();";
+document.getElementById('bm').href = code; document.getElementById('code').value = code;
+</script></body></html>
