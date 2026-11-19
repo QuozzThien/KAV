@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Practice Assistant – Cài đặt</title>
+<style>
+:root{color-scheme:light dark}body{font:15px/1.5 Arial,sans-serif;max-width:680px;margin:40px auto;padding:0 18px}label{display:block;margin:18px 0 6px;font-weight:700}input{width:100%;padding:11px;border:1px solid #8884;border-radius:8px;background:transparent;color:inherit}.row{display:flex;gap:8px}.row input{flex:1}button{padding:10px 16px;border:0;border-radius:8px;background:#2563eb;color:#fff;font-weight:700;cursor:pointer}button.sec{background:#64748b}.bar{display:flex;gap:8px;margin-top:18px;flex-wrap:wrap}small{opacity:.7}
+</style></head><body>
+<h1>Khanware Practice Assistant</h1>
+<p>Thiết lập OpenRouter. API key lưu trong <code>chrome.storage.local</code> trên trình duyệt này và chỉ service worker của tiện ích đọc được (trang web/content script không đọc được).</p>
+<label for="key">OpenRouter API key</label>
+<div class="row"><input id="key" type="password" autocomplete="off" placeholder="sk-or-..."><button id="toggle" class="sec" type="button">Hiện</button></div>
+<label for="model">Model</label><input id="model" placeholder="openrouter/free" list="models"><datalist id="models"><option value="openrouter/free"></datalist>
+<div class="bar"><button id="save" type="button">Lưu</button><button id="test" class="sec" type="button">Kiểm tra kết nối</button><button id="clear" class="sec" type="button">Xóa key</button></div>
+<p id="status" role="status"></p>
+<small>Không chia sẻ API key hoặc commit key lên GitHub. Model không hỗ trợ JSON mode vẫn dùng được (tiện ích tự thử lại không có JSON mode).</small>
+<script src="src/options.js"></script>
+</body></html>

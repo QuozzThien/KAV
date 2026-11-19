@@ -1,0 +1,14 @@
+{
+  "name": "khanware-practice-assistant",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Khanware Practice Assistant (Chrome MV3)",
+  "scripts": {
+    "check": "for f in src/*.js src/*/*.js scripts/*.js; do node --check $f || exit 1; done",
+    "build": "node scripts/build.js",
+    "test": "npm run build --silent && node --test tests/*.test.js"
+  },
+  "devDependencies": {
+    "jsdom": "^24.0.0"
+  }
+}

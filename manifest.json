@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "Khanware Practice Assistant",
+  "version": "0.3.0",
+  "description": "AI practice companion: reads visible exercise content and displays suggestions without selecting, entering, or submitting answers.",
+  "minimum_chrome_version": "102",
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://openrouter.ai/*",
+    "https://*.khanacademy.org/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.khanacademy.org/*"
+      ],
+      "js": [
+        "src/shared/helpers.js",
+        "src/reader/contentExtractor.js",
+        "src/widgets/registry.js",
+        "src/reader/questionReader.js",
+        "src/ai/promptBuilder.js",
+        "src/ai/responseParser.js",
+        "src/renderer/suggestionPanel.js",
+        "src/transport/extension.js",
+        "src/content.js"
+      ],
+      "css": [
+        "src/content.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  }
+}
