@@ -1,4 +1,4 @@
-/*! Khanware Practice Assistant v0.3.1 (bookmarklet). Chỉ đọc câu hỏi và hiển thị gợi ý; không chọn/điền/nộp bài. Tạo bởi scripts/build.js, đừng sửa tay. */
+/*! Khanware Practice Assistant v0.3.2 (bookmarklet). Chỉ đọc câu hỏi và hiển thị gợi ý; không chọn/điền/nộp bài. Tạo bởi scripts/build.js, đừng sửa tay. */
 (function () {
 'use strict';
 if (!window.__KPA_TEST__ && !/(^|\.)khanacademy\.org$/i.test(location.hostname)) { alert('Công cụ này chỉ chạy trên khanacademy.org'); return; }
@@ -9,7 +9,7 @@ if (window.__KPA_LOADED__) { if (window.__KPA_OPEN__) window.__KPA_OPEN__(); ret
  * (content script cùng extension dùng chung một "isolated world"); cũng chạy được trong Node để test. */
 (function (root) {
   const K = root.KPA || (root.KPA = {});
-  const clean = v => String(v == null ? '' : v).replace(/\s+/g, ' ').trim();
+  const clean = v => String(v == null ? '' : v).replace(/[\u200B-\u200D\u2060\uFEFF]/g, '').replace(/\s+/g, ' ').trim();
   const truncate = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
 
   // Hiển thị thật sự: không display:none / visibility:hidden / hidden ở bất kỳ tổ tiên nào; có kích thước (nếu bật layout)
@@ -40,6 +40,28 @@ if (window.__KPA_LOADED__) { if (window.__KPA_OPEN__) window.__KPA_OPEN__(); ret
   const H = K.helpers;
   const SKIP = new Set(['script', 'style', 'noscript', 'template']);
 
+  // MathML (MathJax assistive) -> văn bản đọc được, ví dụ x^2, (a)/(b), sqrt(...)
+  const wrap = s => { s = s.trim(); return /^\S+$/.test(s) ? s : '(' + s + ')'; };
+  function mml(n) {
+    if (n.nodeType === 3) return n.nodeValue;
+    if (n.nodeType !== 1) return '';
+    const t = n.localName, k = [...n.children], j = a => a.map(mml).join(' ');
+    switch (t) {
+      case 'annotation': case 'annotation-xml': case 'mspace': return '';
+      case 'msup': { const b = mml(k[0]).trim(), e = mml(k[1]).trim(); return /^[′″‴'*]+$/.test(e) ? b + e : b + '^' + wrap(e); }
+      case 'msub': return mml(k[0]).trim() + '_' + wrap(mml(k[1]));
+      case 'munder': return mml(k[0]).trim() + '_' + wrap(mml(k[1]));
+      case 'mover': return mml(k[0]).trim() + '^' + wrap(mml(k[1]));
+      case 'msubsup': case 'munderover': return mml(k[0]).trim() + '_' + wrap(mml(k[1])) + '^' + wrap(mml(k[2]));
+      case 'mfrac': return '(' + mml(k[0]).trim() + ')/(' + mml(k[1]).trim() + ')';
+      case 'msqrt': return 'sqrt(' + j(k).trim() + ')';
+      case 'mroot': return 'root(' + mml(k[1]).trim() + ', ' + mml(k[0]).trim() + ')';
+      case 'mtable': return '[' + k.map(r => [...r.children].map(c => mml(c).trim()).join(', ')).join('; ') + ']';
+      default: return k.length ? j(k) : n.textContent;
+    }
+  }
+  const mathText = el => { const m = el.querySelector('math'); return H.clean(m ? mml(m).replace(/[\u2061-\u2064]/g, '') : ''); };
+
   // opts.replace: Map<Element,string> thay thế cả khối (dùng để thay widget bằng nhãn [WIDGET w1: radio])
   function nodeText(node, opts) {
     opts = opts || {};
@@ -48,6 +70,9 @@ if (window.__KPA_LOADED__) { if (window.__KPA_OPEN__) window.__KPA_OPEN__(); ret
     const el = node, tag = el.tagName.toLowerCase();
     if (SKIP.has(tag)) return '';
     if (opts.replace && opts.replace.has(el)) return ' ' + opts.replace.get(el) + ' ';
+    // MathJax: dùng MathML trợ năng (các mjx-c chỉ là hình, không có chữ); bỏ nút/svg đi kèm
+    if (tag === 'mjx-container') { const t = mathText(el); return t ? ' $' + t + '$ ' : ''; }
+    if (el.classList.contains('mathjax-selectable') || el.classList.contains('copy-menu-hack')) return '';
     // KaTeX: lấy mã TeX gốc, tránh lặp chữ giữa lớp MathML và lớp HTML
     if (el.classList.contains('katex')) {
       const ann = el.querySelector('annotation[encoding="application/x-tex"]');
@@ -58,6 +83,7 @@ if (window.__KPA_LOADED__) { if (window.__KPA_OPEN__) window.__KPA_OPEN__(); ret
     if (!H.isVisible(el)) return '';
     if (tag === 'img') { const a = H.clean(el.getAttribute('alt')); return a ? ' [ảnh: ' + a + '] ' : ' [ảnh không có mô tả] '; }
     if (tag === 'svg') {
+      if (el.closest('.mathjax-wrapper,mjx-container')) return '';
       const t = H.clean(el.getAttribute('aria-label') || (el.querySelector('title') || {}).textContent);
       return t ? ' [hình vẽ: ' + t + '] ' : ' [hình vẽ] ';
     }
@@ -95,9 +121,10 @@ if (window.__KPA_LOADED__) { if (window.__KPA_OPEN__) window.__KPA_OPEN__(); ret
     const all = [...c.querySelectorAll(TEXT_INPUT)].filter(vis);
     return all.filter(a => !all.some(b => b !== a && a.contains(b)));
   };
-  const fieldLabel = el => H.clean(el.getAttribute('aria-label') ||
+  const genericLabel = t => /^Ô nhập dữ liệu toán học/i.test(t) || /^math input/i.test(t);
+  const fieldLabel = el => (l => (genericLabel(l) ? '' : l))(H.clean(el.getAttribute('aria-label') ||
     (el.getAttribute('aria-labelledby') && [...el.getAttribute('aria-labelledby').split(/\s+/)].map(id => (el.ownerDocument.getElementById(id) || {}).textContent || '').join(' ')) ||
-    (el.labels && el.labels[0] && el.labels[0].textContent) || el.getAttribute('placeholder') || '');
+    (el.labels && el.labels[0] && el.labels[0].textContent) || el.getAttribute('placeholder') || ''));
   // Phần tử chỉ có ảnh/hình không mô tả => không biết nội dung thật, không được đoán
   const blind = t => /\[(ảnh không có mô tả|hình vẽ|hình vẽ canvas)\]/.test(t);
   const unsupported = reason => ({ supported: false, reason });
@@ -108,6 +135,14 @@ if (window.__KPA_LOADED__) { if (window.__KPA_OPEN__) window.__KPA_OPEN__(); ret
     supported: true,
     format: '{"selected":[<option index>]}  (exactly one index unless data.multiple is true)',
     extract(c) {
+      // Perseus mới: fieldset > ul[role=list] > li[role=listitem] > button[aria-label="(Đáp án A)"] + nội dung ở phần tử có id "...-choice-N"
+      const lis = [...c.querySelectorAll('li[role=listitem]')].filter(li => vis(li) && li.querySelector('[id*="-choice-"]'));
+      if (lis.length >= 2) {
+        const options = lis.map((li, index) => ({ index, text: H.truncate(E.textOf(li.querySelector('[id*="-choice-"]')), LIMITS.opt) }));
+        if (options.some(o => !o.text || blind(o.text))) return { insufficient: 'Không đọc được đủ nội dung các phương án (có thể là phương án dạng hình ảnh).' };
+        const hint = H.clean((c.querySelector('fieldset') || c).textContent);
+        return { data: { multiple: /chọn tất cả|chọn nhiều|select all|all that apply/i.test(hint), options }, refs: lis };
+      }
       const ctl = [...c.querySelectorAll('input[type=radio],input[type=checkbox],[role=radio],[role=checkbox]')].filter(vis);
       const seen = new Set(), holders = [];
       for (const el of ctl) {
@@ -267,13 +302,14 @@ if (window.__KPA_LOADED__) { if (window.__KPA_OPEN__) window.__KPA_OPEN__(); ret
     'numeric-input': inputKind('a number: integer, decimal or fraction like 3/4'),
     'input-number': inputKind('a number'),
     'expression': inputKind('a math expression in plain text, e.g. 2x+3 or (x-1)^2'),
-    'text-input': inputKind('plain text or number'),
+    'text-input': inputKind('answer typed into the field, as a number or math expression in plain text, e.g. 18sin(x) or (x^2)/2; do not repeat text that already appears outside the field in the question, such as a trailing +C'),
     'table': grid(false),
     'matrix': grid(true),
     'orderer': orderer('orderer'),
     'sorter': orderer('sorter'),
     'categorizer': categorizer,
     'matcher': matcher,
+    'unknown-widget': unsupported('Không nhận diện được loại widget này từ cấu trúc trang.'),
     'grapher': unsupported(NO_GRAPH),
     'interactive-graph': unsupported(NO_GRAPH),
     'plotter': unsupported(NO_GRAPH),
@@ -283,18 +319,30 @@ if (window.__KPA_LOADED__) { if (window.__KPA_OPEN__) window.__KPA_OPEN__(); ret
 
   /* ---------- Bộ nhận diện ---------- */
   // Perseus gắn class "perseus-widget-<tên>" lên vùng chứa widget (cần xác nhận lại trên DOM thật khi Khan đổi giao diện).
+  // Suy loại widget từ cấu trúc bên trong (Khan dùng vùng chứa chung "perseus-widget-container", không có class theo loại)
+  function inferType(el) {
+    if (el.querySelector('li[role=listitem] [id*="-choice-"]') || el.querySelector('input[type=radio],input[type=checkbox],[role=radio],[role=checkbox]')) return 'radio';
+    if (el.querySelector('select,[role=combobox],button[aria-haspopup]')) return 'dropdown';
+    if (textInputs(el).length) return 'text-input';
+    if (el.querySelector('table')) return 'table';
+    return 'unknown-widget';
+  }
   function detect(rootEl) {
     const found = [];
+    // 1) class theo loại (phiên bản Perseus cũ): perseus-widget-<tên>
     for (const el of rootEl.querySelectorAll('[class*="perseus-widget-"]')) {
       for (const cls of el.classList) {
         const m = /^perseus-widget-(.+)$/.exec(cls);
-        if (m && REGISTRY[m[1]] && m[1] !== 'text-input' && vis(el)) { found.push({ type: m[1], el }); break; }
+        if (m && REGISTRY[m[1]] && !['text-input', 'unknown-widget'].includes(m[1]) && vis(el)) { found.push({ type: m[1], el }); break; }
       }
     }
-    // loại phần tử lồng nhau cùng loại
     const top = found.filter(a => !found.some(b => b !== a && b.type === a.type && b.el.contains(a.el)));
     if (top.length) return { widgets: top, fallback: false };
-    // Dự phòng theo cấu trúc khi không có class widget
+    // 2) vùng chứa chung: suy loại theo cấu trúc
+    const boxes = [...rootEl.querySelectorAll('.perseus-widget-container')].filter(vis);
+    const outer = boxes.filter(a => !boxes.some(b => b !== a && b.contains(a)));
+    if (outer.length) return { widgets: outer.map(el => ({ type: inferType(el), el })), fallback: false };
+    // 3) dự phòng theo cấu trúc toàn vùng
     const fb = [];
     if (rootEl.querySelector('input[type=radio],input[type=checkbox],[role=radio],[role=checkbox]')) fb.push({ type: 'radio', el: rootEl });
     else if (rootEl.querySelector('select')) fb.push({ type: 'dropdown', el: rootEl });
